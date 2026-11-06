@@ -1,6 +1,11 @@
 use crate::{ai, parser};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::Path, process::Command};
+use std::{
+    fs,
+    io::{self, Write},
+    path::Path,
+    process::Command,
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProjectConfig {
@@ -28,7 +33,7 @@ pub fn init_config_silent() {
 /// Loads the first valid config entry name/main_file to act as default when no args are passed
 pub fn load_default_config_target() -> Result<String, String> {
     let file_content = fs::read_to_string(CONFIG_FILE)
-        .map_err(|e| format!("Failed to read `{}`: {}", CONFIG_FILE, e))?;
+        .map_err(|e| format!("Failed to read {}: {}", CONFIG_FILE, e))?;
 
     let configs: Vec<ProjectConfig> = serde_json::from_str(&file_content)
         .map_err(|e| format!("Failed to parse config JSON format: {}", e))?;
@@ -46,7 +51,6 @@ pub fn load_default_config_target() -> Result<String, String> {
 
 /// Main execution and debugging orchestrator workflow with Claude Code UI style
 pub fn debug_target(target: &str) {
-    // 2. Check if config fields are not empty and load configuration
     let config = match load_and_validate_config(target) {
         Ok(cfg) => cfg,
         Err(err_msg) => {
@@ -57,7 +61,6 @@ pub fn debug_target(target: &str) {
         }
     };
 
-    // 3. Check if the required toolchain exists in PATH
     let base_tool = config.exec_cmd.split_whitespace().next().unwrap_or("");
     if !base_tool.is_empty() && !check_toolchain_exists(base_tool) {
         eprintln!("\n╭─ Toolchain Error ───────────────────────────╮");
@@ -69,14 +72,12 @@ pub fn debug_target(target: &str) {
         return;
     }
 
-    // 4. Resolve command placeholder `{}` with the main_file path
     let final_command = if config.exec_cmd.contains("{}") {
         config.exec_cmd.replace("{}", &config.main_file)
     } else {
         format!("{} {}", config.exec_cmd, config.main_file)
     };
 
-    // 5. Run the command with Claude Code styled panel
     println!("\n╭─ Execution Target ──────────────────────────╮");
     println!("│ \x1b[36m◆\x1b[0m Language:  {:<31} │", config.language);
     println!("│ \x1b[36m◆\x1b[0m Command:   {:<31} │", final_command);
@@ -93,7 +94,6 @@ pub fn debug_target(target: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // 6. Handle output: if successful, print clean output stream
     if output.status.success() {
         println!("\n╭─ Output ────────────────────────────────────╮");
         print!("{}", stdout);
@@ -104,7 +104,6 @@ pub fn debug_target(target: &str) {
         return;
     }
 
-    // 7. Execution Error occurred: Styled failure block
     let full_error_output = format!("{}\n{}", stdout, stderr);
     println!("\n\x1b[1;31m╭─ Execution Failed ──────────────────────────╮\x1b[0m");
     println!("\x1b[1;31m│\x1b[0m Status: Exit code nonzero                   \x1b[1;31m│\x1b[0m");
@@ -121,7 +120,6 @@ pub fn debug_target(target: &str) {
         );
     }
 
-    // Gather file context for prompt payload
     let source_code_content = fs::read_to_string(&config.main_file)
         .unwrap_or_else(|_| "[Could not read main source file content]".to_string());
 
@@ -130,7 +128,6 @@ pub fn debug_target(target: &str) {
         config.language, config.main_file, final_command, full_error_output, source_code_content
     );
 
-    // 8. Check if Ollama exists or not
     if ai::check_ollama_dep() {
         println!("\n\x1b[32m◆ Ollama Active\x1b[0m — Querying local AI assistant...\n");
         ai::query_ollama_terminal(&diagnostic_context);
@@ -140,10 +137,84 @@ pub fn debug_target(target: &str) {
     }
 }
 
-/// Validates configuration existence and checks that fields are not empty
+/// Runs a simple interactive TUI menu to select and debug targets from config.json
+pub fn run_interactive_ui() {
+    loop {
+        println!("\n╭─ Interactive Debugger UI ───────────────────╮");
+        println!("│ Select a target to run or type 'q' to exit: │");
+        println!("╰─────────────────────────────────────────────╯");
+
+        let file_content = match fs::read_to_string(CONFIG_FILE) {
+            Ok(content) => content,
+            Err(_) => {
+                eprintln!("\x1b[31m[Error]: Could not read `{}`\x1b[0m", CONFIG_FILE);
+                return;
+            }
+        };
+
+        let configs: Vec<ProjectConfig> = match serde_json::from_str(&file_content) {
+            Ok(cfg) => cfg,
+            Err(_) => {
+                eprintln!("\x1b[31m[Error]: Failed to parse `{}`\x1b[0m", CONFIG_FILE);
+                return;
+            }
+        };
+
+        if configs.is_empty() {
+            println!("No targets found in config.");
+            return;
+        }
+
+        for (i, cfg) in configs.iter().enumerate() {
+            println!(
+                "  [{}] {} ({}) -> {}",
+                i + 1,
+                cfg.name,
+                cfg.language,
+                cfg.main_file
+            );
+        }
+        println!("  [q] Quit");
+
+        print!("\nEnter choice: ");
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            println!("Failed to read input.");
+            continue;
+        }
+
+        let choice = input.trim();
+        if choice.eq_ignore_ascii_case("q") {
+            println!("Exiting UI.");
+            break;
+        }
+
+        if let Ok(index) = choice.parse::<usize>() {
+            if index > 0 && index <= configs.len() {
+                let selected = &configs[index - 1];
+                println!("\nLaunching target: {}", selected.name);
+                debug_target(&selected.name);
+            } else {
+                println!("\x1b[31m[Error]: Invalid selection index.\x1b[0m");
+            }
+        } else {
+            let matched = configs
+                .iter()
+                .any(|c| c.name == choice || c.main_file == choice);
+            if matched {
+                debug_target(choice);
+            } else {
+                println!("\x1b[31m[Error]: Unknown option or target.\x1b[0m");
+            }
+        }
+    }
+}
+
 pub fn load_and_validate_config(target: &str) -> Result<ProjectConfig, String> {
     if !Path::new(CONFIG_FILE).exists() {
-        return Err(format!("Missing `{}`.", CONFIG_FILE));
+        return Err(format!("Missing {}.", CONFIG_FILE));
     }
 
     let file_content = fs::read_to_string(CONFIG_FILE)
