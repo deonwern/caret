@@ -1,5 +1,6 @@
 mod ai;
 mod cli;
+mod language;
 mod parser;
 
 use std::path::Path;

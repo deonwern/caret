@@ -1,8 +1,0 @@
-[
-  {
-    "name": "python",
-    "language": "Python",
-    "main_file": "test.py",
-    "exec_cmd": "python {}"
-  }
-]
